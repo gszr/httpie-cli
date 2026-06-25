@@ -10,11 +10,14 @@ from .encoding import UTF8
 
 ENV_XDG_CONFIG_HOME = 'XDG_CONFIG_HOME'
 ENV_HTTPIE_CONFIG_DIR = 'HTTPIE_CONFIG_DIR'
+ENV_HTTPIE_LOCAL_CONFIG = 'HTTPIE_LOCAL_CONFIG'
 DEFAULT_CONFIG_DIRNAME = 'httpie'
 DEFAULT_RELATIVE_XDG_CONFIG_HOME = Path('.config')
 DEFAULT_RELATIVE_LEGACY_CONFIG_DIR = Path('.httpie')
 DEFAULT_WINDOWS_CONFIG_DIR = Path(
     os.path.expandvars('%APPDATA%')) / DEFAULT_CONFIG_DIRNAME
+LOCAL_CONFIG_FILENAME = '.httpie'
+LOCAL_CONFIG_KEYS = ('default_options', 'headers', 'query')
 
 
 def get_default_config_dir() -> Path:
@@ -170,3 +173,75 @@ class Config(BaseConfigDict):
         we usually ignore."""
 
         return self.get('developer_mode')
+
+
+class LocalConfig(dict):
+    """A per-CWD `.httpie` config layered on top of the user config.
+
+    Recognised keys: `default_options` (list of CLI args),
+    `headers` (object) and `query` (object). Unknown keys are ignored.
+    """
+
+    def __init__(self, path: Path, data: Dict[str, Any]):
+        super().__init__()
+        self.path = path
+        for key in LOCAL_CONFIG_KEYS:
+            if key in data:
+                self[key] = data[key]
+
+    @property
+    def default_options(self) -> list:
+        value = self.get('default_options', [])
+        return value if isinstance(value, list) else []
+
+    @property
+    def headers(self) -> Dict[str, str]:
+        value = self.get('headers', {})
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def query(self) -> Dict[str, str]:
+        value = self.get('query', {})
+        return value if isinstance(value, dict) else {}
+
+    def is_empty(self) -> bool:
+        return not (self.default_options or self.headers or self.query)
+
+    def apply_to_parsed_args(self, args) -> None:
+        """Fill in headers/query from local config, never overriding CLI values."""
+        if self.headers and hasattr(args, 'headers'):
+            for key, value in self.headers.items():
+                if key not in args.headers:
+                    args.headers.add(key, value)
+        if self.query and hasattr(args, 'params'):
+            for key, value in self.query.items():
+                if key not in args.params:
+                    args.params[key] = value
+
+
+def get_local_config_path() -> Path:
+    """Resolve the path the local config would live at (may not exist)."""
+    override = os.environ.get(ENV_HTTPIE_LOCAL_CONFIG)
+    if override:
+        return Path(override)
+    return Path.cwd() / LOCAL_CONFIG_FILENAME
+
+
+def load_local_config() -> Union['LocalConfig', None]:
+    """Return the local config from CWD, or None if absent/unreadable.
+
+    Raises ConfigFileError on invalid JSON so callers can surface it.
+    """
+    try:
+        path = get_local_config_path()
+    except (OSError, FileNotFoundError):
+        # CWD was deleted out from under us.
+        return None
+    data = read_raw_config('local config', path)
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigFileError(
+            f'invalid local config file: top-level value must be an object [{path}]'
+        )
+    return LocalConfig(path=path, data=data)

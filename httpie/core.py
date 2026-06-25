@@ -13,6 +13,7 @@ from . import __version__ as httpie_version
 from .cli.constants import OUT_REQ_BODY
 from .cli.nested_json import NestedJSONSyntaxError
 from .client import collect_messages
+from .config import ConfigFileError, LocalConfig, load_local_config
 from .context import Environment, LogLevel
 from .downloads import Downloader
 from .models import (
@@ -45,8 +46,28 @@ def raw_main(
 
     plugin_manager.load_installed_plugins(env.config.plugins_dir)
 
+    local_config: Optional[LocalConfig] = None
+    if use_default_options:
+        try:
+            local_config = load_local_config()
+        except ConfigFileError as e:
+            env.log_error(str(e), level=LogLevel.WARNING)
+        if local_config and not local_config.is_empty():
+            env.log_error(
+                f'loaded local config {local_config.path}'
+                f' ({len(local_config.default_options)} options,'
+                f' {len(local_config.headers)} headers,'
+                f' {len(local_config.query)} query)',
+                level=LogLevel.INFO,
+            )
+
+    prepend: List[str] = []
     if use_default_options and env.config.default_options:
-        args = env.config.default_options + args
+        prepend.extend(env.config.default_options)
+    if local_config and local_config.default_options:
+        prepend.extend(local_config.default_options)
+    if prepend:
+        args = prepend + args
 
     include_debug_info = '--debug' in args
     include_traceback = include_debug_info or '--traceback' in args
@@ -95,6 +116,8 @@ def raw_main(
                 raise
             exit_status = ExitStatus.ERROR
     else:
+        if local_config:
+            local_config.apply_to_parsed_args(parsed_args)
         check_updates(env)
         try:
             exit_status = main_program(
